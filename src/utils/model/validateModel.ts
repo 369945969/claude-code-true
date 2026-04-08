@@ -10,6 +10,10 @@ import {
   AuthenticationError,
 } from '@anthropic-ai/sdk'
 import { getModelStrings } from './modelStrings.js'
+import { getOpenAIClient } from '../../services/api/openai/client.js'
+import { resolveOpenAIModel } from '../../services/api/openai/modelMapping.js'
+
+declare const process: { env: Record<string, string | undefined> }
 
 // Cache valid models to avoid repeated API calls
 const validModelCache = new Map<string, boolean>()
@@ -21,6 +25,8 @@ export async function validateModel(
   model: string,
 ): Promise<{ valid: boolean; error?: string }> {
   const normalizedModel = model.trim()
+  const provider = getAPIProvider()
+  const cacheKey = `${provider}:${normalizedModel}`
 
   // Empty model is invalid
   if (!normalizedModel) {
@@ -47,13 +53,24 @@ export async function validateModel(
   }
 
   // Check cache first
-  if (validModelCache.has(normalizedModel)) {
+  if (validModelCache.has(cacheKey)) {
     return { valid: true }
   }
 
 
-  // Try to make an actual API call with minimal parameters
   try {
+    if (provider === 'openai') {
+      const openaiModel = resolveOpenAIModel(normalizedModel)
+      const client = getOpenAIClient({ maxRetries: 0 })
+      await client.chat.completions.create({
+        model: openaiModel,
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 1,
+      })
+      validModelCache.set(cacheKey, true)
+      return { valid: true }
+    }
+
     await sideQuery({
       model: normalizedModel,
       max_tokens: 1,
@@ -73,10 +90,12 @@ export async function validateModel(
       ],
     })
 
-    // If we got here, the model is valid
-    validModelCache.set(normalizedModel, true)
+    validModelCache.set(cacheKey, true)
     return { valid: true }
   } catch (error) {
+    if (provider === 'openai') {
+      return handleOpenAIValidationError(error, normalizedModel)
+    }
     return handleValidationError(error, normalizedModel)
   }
 }
@@ -97,6 +116,7 @@ function handleValidationError(
 
   // For other API errors, provide context-specific messages
   if (error instanceof APIError) {
+    const apiError = error as any
     if (error instanceof AuthenticationError) {
       return {
         valid: false,
@@ -112,7 +132,7 @@ function handleValidationError(
     }
 
     // Check error body for model-specific errors
-    const errorBody = error.error as unknown
+    const errorBody = apiError.error as unknown
     if (
       errorBody &&
       typeof errorBody === 'object' &&
@@ -126,7 +146,10 @@ function handleValidationError(
     }
 
     // Generic API error
-    return { valid: false, error: `API error: ${error.message}` }
+    return {
+      valid: false,
+      error: `API error: ${typeof apiError.message === 'string' ? apiError.message : 'Unknown error'}`,
+    }
   }
 
   // For unknown errors, be safe and reject
@@ -156,4 +179,55 @@ function get3PFallbackSuggestion(model: string): string | undefined {
     return getModelStrings().sonnet40
   }
   return undefined
+}
+
+function handleOpenAIValidationError(
+  error: unknown,
+  modelName: string,
+): { valid: boolean; error: string } {
+  const openaiModel = resolveOpenAIModel(modelName)
+
+  const anyErr = error as any
+  const status =
+    typeof anyErr?.status === 'number'
+      ? (anyErr.status as number)
+      : typeof anyErr?.statusCode === 'number'
+        ? (anyErr.statusCode as number)
+        : undefined
+  const message =
+    typeof anyErr?.message === 'string' ? anyErr.message : String(error)
+
+  if (status === 401 || status === 403) {
+    return {
+      valid: false,
+      error: 'Authentication failed. Please check your OpenAI API credentials.',
+    }
+  }
+
+  if (status === 404 || /model/i.test(message) && /not\s*found/i.test(message)) {
+    if (openaiModel !== modelName) {
+      return {
+        valid: false,
+        error: `Model '${modelName}' maps to '${openaiModel}' but the OpenAI endpoint does not recognize it. Configure OPENAI_MODEL or OPENAI_DEFAULT_*_MODEL.`,
+      }
+    }
+    return { valid: false, error: `Model '${modelName}' not found` }
+  }
+
+  const networkHints = [
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'fetch failed',
+  ]
+  if (networkHints.some(h => message.includes(h))) {
+    return {
+      valid: false,
+      error:
+        'Network error. Please check OPENAI_BASE_URL and that the endpoint is reachable.',
+    }
+  }
+
+  return { valid: false, error: `API error: ${message}` }
 }
