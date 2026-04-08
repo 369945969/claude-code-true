@@ -17,7 +17,8 @@ export function escapeRegExp(str: string): string {
  * @example capitalize('fooBar') → 'FooBar'
  * @example capitalize('hello world') → 'Hello world'
  */
-export function capitalize(str: string): string {
+export function capitalize(str: string | undefined | null): string {
+  if (!str) return ''
   return str.charAt(0).toUpperCase() + str.slice(1)
 }
 

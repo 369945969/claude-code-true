@@ -42,6 +42,9 @@ import { Select } from './CustomSelect/index.js'
 import { Byline, KeyboardShortcutHint, Pane } from '@anthropic/ink'
 import { effortLevelToSymbol } from './EffortIndicator.js'
 import TextInput from './TextInput.js'
+import { validateModel } from '../utils/model/validateModel.js'
+import { applyConfigEnvironmentVariables } from '../utils/managedEnv.js'
+import { clearOpenAIClientCache } from '../services/api/openai/client.js'
 
 export type Props = {
   initial: string | null
@@ -62,7 +65,7 @@ export type Props = {
 }
 
 const NO_PREFERENCE = '__NO_PREFERENCE__'
-const OPENAI_CUSTOM_MODEL = '__OPENAI_CUSTOM_MODEL__'
+const CUSTOM_MODEL = '__CUSTOM_MODEL__'
 
 export function ModelPicker({
   initial,
@@ -103,13 +106,15 @@ export function ModelPicker({
   )
 
   const optionsWithProviderAdditions = useMemo(() => {
-    if (provider !== 'openai') return modelOptions
     return [
       ...modelOptions,
       {
-        value: OPENAI_CUSTOM_MODEL,
-        label: 'Custom (OpenAI)',
-        description: 'Enter a model ID for your OpenAI-compatible endpoint',
+        value: CUSTOM_MODEL,
+        label: provider === 'openai' ? 'Custom (OpenAI)' : 'Custom',
+        description:
+          provider === 'openai'
+            ? 'Enter a model ID for your OpenAI-compatible endpoint'
+            : 'Enter a model ID',
       },
     ]
   }, [modelOptions, provider])
@@ -169,18 +174,31 @@ export function ModelPicker({
     effort === 'max' && !focusedSupportsMax ? 'high' : effort
 
   const [isEnteringCustomModel, setIsEnteringCustomModel] = useState(false)
-  const [customModelInput, setCustomModelInput] = useState(() => {
-    if (provider !== 'openai') return ''
+  type CustomField = 'base_url' | 'api_key' | 'model_id'
+  const FIELDS: CustomField[] = ['base_url', 'api_key', 'model_id']
+  const [activeField, setActiveField] = useState<CustomField>('base_url')
+  const initialModelId = useMemo(() => {
     if (initial === null) return ''
-    const isBuiltIn = optionsWithProviderAdditions.some(
-      opt => opt.value === initial,
-    )
+    const isBuiltIn = optionsWithProviderAdditions.some(opt => opt.value === initial)
     return isBuiltIn ? '' : initial
-  })
-  const [customModelCursorOffset, setCustomModelCursorOffset] = useState(() => {
-    if (provider !== 'openai') return 0
-    return customModelInput.length
-  })
+  }, [initial, optionsWithProviderAdditions])
+  const [baseUrl, setBaseUrl] = useState(() => process.env.OPENAI_BASE_URL ?? '')
+  const [apiKey, setApiKey] = useState(() => process.env.OPENAI_API_KEY ?? '')
+  const [modelId, setModelId] = useState(() => initialModelId)
+  const displayValues: Record<CustomField, string> = useMemo(
+    () => ({
+      base_url: baseUrl,
+      api_key: apiKey,
+      model_id: modelId,
+    }),
+    [apiKey, baseUrl, modelId],
+  )
+  const [inputValue, setInputValue] = useState(() => displayValues[activeField])
+  const [inputCursorOffset, setInputCursorOffset] = useState(
+    () => displayValues[activeField].length,
+  )
+  const [isValidatingCustomModel, setIsValidatingCustomModel] = useState(false)
+  const [customModelError, setCustomModelError] = useState<string | null>(null)
 
   useKeybinding(
     'confirm:no',
@@ -254,10 +272,143 @@ export function ModelPicker({
     ],
   )
 
+  const setActiveFieldValue = useCallback(
+    (field: CustomField, value: string) => {
+      switch (field) {
+        case 'base_url':
+          setBaseUrl(value)
+          return
+        case 'api_key':
+          setApiKey(value)
+          return
+        case 'model_id':
+          setModelId(value)
+          return
+      }
+    },
+    [],
+  )
+
+  const handleCustomEnter = useCallback(() => {
+    const idx = FIELDS.indexOf(activeField)
+    const isLast = idx === FIELDS.length - 1
+    setActiveFieldValue(activeField, inputValue)
+    if (!isLast) {
+      const next = FIELDS[idx + 1]!
+      setActiveField(next)
+      setInputValue(displayValues[next] ?? '')
+      setInputCursorOffset((displayValues[next] ?? '').length)
+      return
+    }
+
+    void (async () => {
+      setCustomModelError(null)
+
+      const finalBaseUrl = (activeField === 'base_url' ? inputValue : baseUrl).trim()
+      const finalApiKey = (activeField === 'api_key' ? inputValue : apiKey).trim()
+      const finalModelId = (activeField === 'model_id' ? inputValue : modelId).trim()
+
+      if (!finalModelId) {
+        setIsEnteringCustomModel(false)
+        return
+      }
+
+      const shouldConfigureOpenAI =
+        provider === 'openai' || finalBaseUrl.length > 0 || finalApiKey.length > 0
+
+      if (shouldConfigureOpenAI) {
+        if (finalBaseUrl) {
+          try {
+            new URL(finalBaseUrl)
+          } catch {
+            setCustomModelError(
+              'Invalid base URL: please enter a full URL including protocol (e.g., http://localhost:11434/v1)',
+            )
+            return
+          }
+        }
+
+        const env: Record<string, string> = {}
+        if (finalBaseUrl) env.OPENAI_BASE_URL = finalBaseUrl
+        env.OPENAI_API_KEY = finalApiKey || 'dummy'
+        updateSettingsForSource('userSettings', {
+          modelType: 'openai' as any,
+          env,
+        } as any)
+        applyConfigEnvironmentVariables()
+        clearOpenAIClientCache()
+      }
+
+      setIsValidatingCustomModel(true)
+      const { valid, error } = await validateModel(finalModelId)
+      setIsValidatingCustomModel(false)
+
+      if (!valid) {
+        setCustomModelError(error ?? `Model '${finalModelId}' not found`)
+        return
+      }
+
+      persistEffortSelection(finalModelId)
+      const selectedEffort =
+        hasToggledEffort && modelSupportsEffort(finalModelId) ? effort : undefined
+      setIsEnteringCustomModel(false)
+      onSelect(finalModelId, selectedEffort)
+    })()
+  }, [
+    activeField,
+    apiKey,
+    baseUrl,
+    displayValues,
+    effort,
+    hasToggledEffort,
+    inputValue,
+    modelId,
+    onSelect,
+    persistEffortSelection,
+    provider,
+    setActiveFieldValue,
+  ])
+
+  useKeybinding(
+    'tabs:next',
+    () => {
+      if (!isEnteringCustomModel) return
+      const idx = FIELDS.indexOf(activeField)
+      if (idx < FIELDS.length - 1) {
+        setActiveFieldValue(activeField, inputValue)
+        const next = FIELDS[idx + 1]!
+        setActiveField(next)
+        setInputValue(displayValues[next] ?? '')
+        setInputCursorOffset((displayValues[next] ?? '').length)
+      }
+    },
+    { context: 'FormField' },
+  )
+
+  useKeybinding(
+    'tabs:previous',
+    () => {
+      if (!isEnteringCustomModel) return
+      const idx = FIELDS.indexOf(activeField)
+      if (idx > 0) {
+        setActiveFieldValue(activeField, inputValue)
+        const prev = FIELDS[idx - 1]!
+        setActiveField(prev)
+        setInputValue(displayValues[prev] ?? '')
+        setInputCursorOffset((displayValues[prev] ?? '').length)
+      }
+    },
+    { context: 'FormField' },
+  )
+
   function handleSelect(value: string): void {
-    if (value === OPENAI_CUSTOM_MODEL) {
+    if (value === CUSTOM_MODEL) {
       setIsEnteringCustomModel(true)
-      setCustomModelCursorOffset(customModelInput.length)
+      setCustomModelError(null)
+      setIsValidatingCustomModel(false)
+      setActiveField('base_url')
+      setInputValue(displayValues.base_url ?? '')
+      setInputCursorOffset((displayValues.base_url ?? '').length)
       return
     }
 
@@ -278,7 +429,7 @@ export function ModelPicker({
   const customHeaderText =
     provider === 'openai'
       ? 'Switch the model ID for your OpenAI-compatible endpoint. This applies to this session and future sessions.'
-      : undefined
+      : 'Switch between Claude models. Applies to this session and future Claude Code sessions.'
 
   const content = (
     <Box flexDirection="column">
@@ -303,36 +454,91 @@ export function ModelPicker({
         <Box flexDirection="column" marginBottom={1}>
           {isEnteringCustomModel ? (
             <Box flexDirection="column" gap={1}>
-              <Text>Enter OpenAI model ID:</Text>
-              <Box flexDirection="row" gap={1}>
-                <Text>{figures.pointer}</Text>
-                <TextInput
-                  value={customModelInput}
-                  onChange={setCustomModelInput}
-                  onSubmit={() => {
-                    const trimmed = customModelInput.trim()
-                    if (!trimmed) {
-                      setIsEnteringCustomModel(false)
-                      return
-                    }
-                    persistEffortSelection(trimmed)
-                    const selectedModel = trimmed
-                    const selectedEffort =
-                      hasToggledEffort && modelSupportsEffort(selectedModel)
-                        ? effort
-                        : undefined
-                    setIsEnteringCustomModel(false)
-                    onSelect(selectedModel, selectedEffort)
-                  }}
-                  focus={true}
-                  showCursor={true}
-                  placeholder={`e.g., qwen2.5-coder${figures.ellipsis}`}
-                  columns={60}
-                  cursorOffset={customModelCursorOffset}
-                  onChangeCursorOffset={setCustomModelCursorOffset}
-                />
+              <Text>Enter model config:</Text>
+              <Box flexDirection="column" gap={1}>
+                <Box>
+                  <Text
+                    backgroundColor={activeField === 'base_url' ? 'suggestion' : undefined}
+                    color={activeField === 'base_url' ? 'inverseText' : undefined}
+                  >
+                    {' Base URL '}
+                  </Text>
+                  <Text> </Text>
+                  {activeField === 'base_url' ? (
+                    <TextInput
+                      value={inputValue}
+                      onChange={setInputValue}
+                      onSubmit={handleCustomEnter}
+                      cursorOffset={inputCursorOffset}
+                      onChangeCursorOffset={setInputCursorOffset}
+                      columns={60}
+                      focus={true}
+                      placeholder={`e.g., http://localhost:11434/v1${figures.ellipsis}`}
+                    />
+                  ) : baseUrl ? (
+                    <Text color="success">{baseUrl}</Text>
+                  ) : null}
+                </Box>
+                <Box>
+                  <Text
+                    backgroundColor={activeField === 'api_key' ? 'suggestion' : undefined}
+                    color={activeField === 'api_key' ? 'inverseText' : undefined}
+                  >
+                    {' API Key  '}
+                  </Text>
+                  <Text> </Text>
+                  {activeField === 'api_key' ? (
+                    <TextInput
+                      value={inputValue}
+                      onChange={setInputValue}
+                      onSubmit={handleCustomEnter}
+                      cursorOffset={inputCursorOffset}
+                      onChangeCursorOffset={setInputCursorOffset}
+                      columns={60}
+                      focus={true}
+                      mask="*"
+                      placeholder={`(any string works for most local endpoints)${figures.ellipsis}`}
+                    />
+                  ) : apiKey ? (
+                    <Text color="success">
+                      {apiKey.slice(0, 8) + '\u00b7'.repeat(Math.max(0, apiKey.length - 8))}
+                    </Text>
+                  ) : null}
+                </Box>
+                <Box>
+                  <Text
+                    backgroundColor={activeField === 'model_id' ? 'suggestion' : undefined}
+                    color={activeField === 'model_id' ? 'inverseText' : undefined}
+                  >
+                    {' Model ID '}
+                  </Text>
+                  <Text> </Text>
+                  {activeField === 'model_id' ? (
+                    <TextInput
+                      value={inputValue}
+                      onChange={setInputValue}
+                      onSubmit={handleCustomEnter}
+                      cursorOffset={inputCursorOffset}
+                      onChangeCursorOffset={setInputCursorOffset}
+                      columns={60}
+                      focus={true}
+                      placeholder={`e.g., qwen2.5-coder${figures.ellipsis}`}
+                    />
+                  ) : modelId ? (
+                    <Text color="success">{modelId}</Text>
+                  ) : null}
+                </Box>
               </Box>
-              <Text dimColor>Press Esc to go back</Text>
+              <Text dimColor>
+                ↑↓/Tab to switch · Enter on last field to save · Esc to go back
+              </Text>
+              {isValidatingCustomModel ? (
+                <Text dimColor>Validating…</Text>
+              ) : customModelError ? (
+                <Text color="error">{customModelError}</Text>
+              ) : (
+                <Text dimColor>Press Esc to go back</Text>
+              )}
             </Box>
           ) : (
             <>
