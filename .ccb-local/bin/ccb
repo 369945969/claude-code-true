@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "/Users/jack/typescript/claude-code-true"
+exec bun run "/Users/jack/typescript/claude-code-true/dist/cli.js" "$@"

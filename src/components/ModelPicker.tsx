@@ -17,6 +17,7 @@ import { capitalize } from 'src/utils/stringUtils.js'
 import { Box, Text } from '@anthropic/ink'
 import { useKeybinding, useKeybindings } from '../keybindings/useKeybinding.js'
 import { useAppState, useSetAppState } from '../state/AppState.js'
+import { randomUUID } from 'crypto'
 import {
   convertEffortValueToLevel,
   type EffortLevel,
@@ -65,7 +66,21 @@ export type Props = {
 }
 
 const NO_PREFERENCE = '__NO_PREFERENCE__'
-const CUSTOM_MODEL = '__CUSTOM_MODEL__'
+const CUSTOM_ADD = '__CUSTOM_ADD__'
+const CUSTOM_PREFIX = '__CUSTOM_SAVED__:'
+const CUSTOM_ACTION_USE = '__CUSTOM_ACTION_USE__'
+const CUSTOM_ACTION_EDIT = '__CUSTOM_ACTION_EDIT__'
+const CUSTOM_ACTION_DELETE = '__CUSTOM_ACTION_DELETE__'
+const CUSTOM_ACTION_BACK = '__CUSTOM_ACTION_BACK__'
+
+type CustomModelConfig = {
+  id: string
+  label?: string
+  provider: 'openai'
+  baseUrl?: string
+  apiKey?: string
+  model: string
+}
 
 export function ModelPicker({
   initial,
@@ -82,7 +97,24 @@ export function ModelPicker({
   const maxVisible = 10
   const provider = getAPIProvider()
 
-  const initialValue = initial === null ? NO_PREFERENCE : initial
+  const [customModels, setCustomModels] = useState<CustomModelConfig[]>(
+    () => getSettingsForSource('userSettings')?.customModels ?? [],
+  )
+  const [activeCustomModelId, setActiveCustomModelId] = useState<
+    string | undefined
+  >(() => getSettingsForSource('userSettings')?.activeCustomModelId)
+
+  const initialValue = useMemo(() => {
+    if (initial === null) return NO_PREFERENCE
+    const active =
+      activeCustomModelId &&
+      customModels.find(m => m.id === activeCustomModelId && m.model === initial)
+    if (active) {
+      return `${CUSTOM_PREFIX}${active.id}`
+    }
+    return initial
+  }, [activeCustomModelId, customModels, initial])
+
   const [focusedValue, setFocusedValue] = useState<string | undefined>(
     initialValue,
   )
@@ -106,18 +138,34 @@ export function ModelPicker({
   )
 
   const optionsWithProviderAdditions = useMemo(() => {
+    const customOptions = customModels.map(m => {
+      let suffix = ''
+      if (m.baseUrl) {
+        try {
+          suffix = ` · ${new URL(m.baseUrl).host}`
+        } catch {
+          suffix = ` · ${m.baseUrl}`
+        }
+      }
+      return {
+        value: `${CUSTOM_PREFIX}${m.id}`,
+        label: m.label ?? m.model,
+        description: `${m.provider.toUpperCase()}${suffix}`,
+      }
+    })
     return [
       ...modelOptions,
+      ...customOptions,
       {
-        value: CUSTOM_MODEL,
-        label: provider === 'openai' ? 'Custom (OpenAI)' : 'Custom',
+        value: CUSTOM_ADD,
+        label: provider === 'openai' ? 'Add custom model (OpenAI)' : 'Add custom model',
         description:
           provider === 'openai'
-            ? 'Enter a model ID for your OpenAI-compatible endpoint'
-            : 'Enter a model ID',
+            ? 'Save another OpenAI-compatible model configuration'
+            : 'Save another custom model configuration',
       },
     ]
-  }, [modelOptions, provider])
+  }, [customModels, modelOptions, provider])
 
   // Ensure the initial value is in the options list
   // This handles edge cases where the user's current model (e.g., 'haiku' for 3P users)
@@ -173,38 +221,40 @@ export function ModelPicker({
   const displayEffort =
     effort === 'max' && !focusedSupportsMax ? 'high' : effort
 
-  const [isEnteringCustomModel, setIsEnteringCustomModel] = useState(false)
-  type CustomField = 'base_url' | 'api_key' | 'model_id'
-  const FIELDS: CustomField[] = ['base_url', 'api_key', 'model_id']
-  const [activeField, setActiveField] = useState<CustomField>('base_url')
-  const initialModelId = useMemo(() => {
-    if (initial === null) return ''
-    const isBuiltIn = optionsWithProviderAdditions.some(opt => opt.value === initial)
-    return isBuiltIn ? '' : initial
-  }, [initial, optionsWithProviderAdditions])
-  const [baseUrl, setBaseUrl] = useState(() => process.env.OPENAI_BASE_URL ?? '')
-  const [apiKey, setApiKey] = useState(() => process.env.OPENAI_API_KEY ?? '')
-  const [modelId, setModelId] = useState(() => initialModelId)
+  const [customPanel, setCustomPanel] = useState<
+    | { state: 'none' }
+    | { state: 'actions'; id: string }
+    | { state: 'form'; mode: 'add' | 'edit'; id?: string }
+  >({ state: 'none' })
+
+  type CustomField = 'label' | 'base_url' | 'api_key' | 'model_id'
+  const FORM_FIELDS: CustomField[] = ['label', 'base_url', 'api_key', 'model_id']
+  const [activeField, setActiveField] = useState<CustomField>('label')
+  const [labelValue, setLabelValue] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [modelId, setModelId] = useState('')
   const displayValues: Record<CustomField, string> = useMemo(
     () => ({
+      label: labelValue,
       base_url: baseUrl,
       api_key: apiKey,
       model_id: modelId,
     }),
-    [apiKey, baseUrl, modelId],
+    [apiKey, baseUrl, labelValue, modelId],
   )
-  const [inputValue, setInputValue] = useState(() => displayValues[activeField])
-  const [inputCursorOffset, setInputCursorOffset] = useState(
-    () => displayValues[activeField].length,
-  )
+  const [inputValue, setInputValue] = useState('')
+  const [inputCursorOffset, setInputCursorOffset] = useState(0)
   const [isValidatingCustomModel, setIsValidatingCustomModel] = useState(false)
   const [customModelError, setCustomModelError] = useState<string | null>(null)
 
   useKeybinding(
     'confirm:no',
     () => {
-      if (!isEnteringCustomModel) return
-      setIsEnteringCustomModel(false)
+      if (customPanel.state === 'none') return
+      setCustomModelError(null)
+      setIsValidatingCustomModel(false)
+      setCustomPanel({ state: 'none' })
     },
     { context: 'Settings' },
   )
@@ -275,6 +325,9 @@ export function ModelPicker({
   const setActiveFieldValue = useCallback(
     (field: CustomField, value: string) => {
       switch (field) {
+        case 'label':
+          setLabelValue(value)
+          return
         case 'base_url':
           setBaseUrl(value)
           return
@@ -290,11 +343,13 @@ export function ModelPicker({
   )
 
   const handleCustomEnter = useCallback(() => {
-    const idx = FIELDS.indexOf(activeField)
-    const isLast = idx === FIELDS.length - 1
+    if (customPanel.state !== 'form') return
+
+    const idx = FORM_FIELDS.indexOf(activeField)
+    const isLast = idx === FORM_FIELDS.length - 1
     setActiveFieldValue(activeField, inputValue)
     if (!isLast) {
-      const next = FIELDS[idx + 1]!
+      const next = FORM_FIELDS[idx + 1]!
       setActiveField(next)
       setInputValue(displayValues[next] ?? '')
       setInputCursorOffset((displayValues[next] ?? '').length)
@@ -304,13 +359,29 @@ export function ModelPicker({
     void (async () => {
       setCustomModelError(null)
 
+      const finalLabel = (activeField === 'label' ? inputValue : labelValue).trim()
       const finalBaseUrl = (activeField === 'base_url' ? inputValue : baseUrl).trim()
       const finalApiKey = (activeField === 'api_key' ? inputValue : apiKey).trim()
       const finalModelId = (activeField === 'model_id' ? inputValue : modelId).trim()
 
       if (!finalModelId) {
-        setIsEnteringCustomModel(false)
+        setCustomPanel({ state: 'none' })
         return
+      }
+
+      const idForUniqueness =
+        customPanel.mode === 'edit' && customPanel.id ? customPanel.id : undefined
+      if (finalLabel) {
+        const normalized = finalLabel.toLowerCase()
+        const labelExists = customModels.some(m => {
+          if (idForUniqueness && m.id === idForUniqueness) return false
+          const existing = (m.label ?? m.model).trim().toLowerCase()
+          return existing === normalized
+        })
+        if (labelExists) {
+          setCustomModelError(`Label '${finalLabel}' already exists`)
+          return
+        }
       }
 
       const shouldConfigureOpenAI =
@@ -348,20 +419,46 @@ export function ModelPicker({
         return
       }
 
+      const id =
+        customPanel.mode === 'edit' && customPanel.id ? customPanel.id : randomUUID()
+      const entry: CustomModelConfig = {
+        id,
+        provider: 'openai',
+        ...(finalLabel ? { label: finalLabel } : {}),
+        ...(finalBaseUrl ? { baseUrl: finalBaseUrl } : {}),
+        ...(finalApiKey ? { apiKey: finalApiKey } : {}),
+        model: finalModelId,
+      }
+
+      const nextCustomModels =
+        customPanel.mode === 'edit'
+          ? customModels.map(m => (m.id === id ? entry : m))
+          : [...customModels, entry]
+
+      setCustomModels(nextCustomModels)
+      setActiveCustomModelId(id)
+      updateSettingsForSource('userSettings', {
+        customModels: nextCustomModels as any,
+        activeCustomModelId: id,
+      } as any)
+
       persistEffortSelection(finalModelId)
       const selectedEffort =
         hasToggledEffort && modelSupportsEffort(finalModelId) ? effort : undefined
-      setIsEnteringCustomModel(false)
+      setCustomPanel({ state: 'none' })
       onSelect(finalModelId, selectedEffort)
     })()
   }, [
     activeField,
+    customPanel,
+    customModels,
     apiKey,
     baseUrl,
     displayValues,
     effort,
     hasToggledEffort,
     inputValue,
+    labelValue,
     modelId,
     onSelect,
     persistEffortSelection,
@@ -372,43 +469,100 @@ export function ModelPicker({
   useKeybinding(
     'tabs:next',
     () => {
-      if (!isEnteringCustomModel) return
-      const idx = FIELDS.indexOf(activeField)
-      if (idx < FIELDS.length - 1) {
+      if (customPanel.state !== 'form') return
+      const idx = FORM_FIELDS.indexOf(activeField)
+      if (idx < FORM_FIELDS.length - 1) {
         setActiveFieldValue(activeField, inputValue)
-        const next = FIELDS[idx + 1]!
+        const next = FORM_FIELDS[idx + 1]!
         setActiveField(next)
         setInputValue(displayValues[next] ?? '')
         setInputCursorOffset((displayValues[next] ?? '').length)
       }
     },
-    { context: 'FormField' },
+    { context: 'FormField', isActive: customPanel.state === 'form' },
   )
 
   useKeybinding(
     'tabs:previous',
     () => {
-      if (!isEnteringCustomModel) return
-      const idx = FIELDS.indexOf(activeField)
+      if (customPanel.state !== 'form') return
+      const idx = FORM_FIELDS.indexOf(activeField)
       if (idx > 0) {
         setActiveFieldValue(activeField, inputValue)
-        const prev = FIELDS[idx - 1]!
+        const prev = FORM_FIELDS[idx - 1]!
         setActiveField(prev)
         setInputValue(displayValues[prev] ?? '')
         setInputCursorOffset((displayValues[prev] ?? '').length)
       }
     },
-    { context: 'FormField' },
+    { context: 'FormField', isActive: customPanel.state === 'form' },
+  )
+
+  const applyCustomModel = useCallback(
+    async (entry: CustomModelConfig) => {
+      const finalBaseUrl = (entry.baseUrl ?? '').trim()
+      const finalApiKey = (entry.apiKey ?? '').trim()
+      const finalModelId = entry.model.trim()
+
+      if (finalBaseUrl) {
+        try {
+          new URL(finalBaseUrl)
+        } catch {
+          setCustomModelError(
+            'Invalid base URL: please enter a full URL including protocol (e.g., http://localhost:11434/v1)',
+          )
+          return
+        }
+      }
+
+      const env: Record<string, string> = {}
+      if (finalBaseUrl) env.OPENAI_BASE_URL = finalBaseUrl
+      env.OPENAI_API_KEY = finalApiKey || 'dummy'
+      updateSettingsForSource('userSettings', {
+        modelType: 'openai' as any,
+        env,
+        activeCustomModelId: entry.id,
+      } as any)
+      applyConfigEnvironmentVariables()
+      clearOpenAIClientCache()
+      setActiveCustomModelId(entry.id)
+
+      setIsValidatingCustomModel(true)
+      const { valid, error } = await validateModel(finalModelId)
+      setIsValidatingCustomModel(false)
+      if (!valid) {
+        setCustomModelError(error ?? `Model '${finalModelId}' not found`)
+        return
+      }
+
+      persistEffortSelection(finalModelId)
+      const selectedEffort =
+        hasToggledEffort && modelSupportsEffort(finalModelId) ? effort : undefined
+      setCustomPanel({ state: 'none' })
+      onSelect(finalModelId, selectedEffort)
+    },
+    [effort, hasToggledEffort, onSelect, persistEffortSelection],
   )
 
   function handleSelect(value: string): void {
-    if (value === CUSTOM_MODEL) {
-      setIsEnteringCustomModel(true)
+    if (value === CUSTOM_ADD) {
       setCustomModelError(null)
       setIsValidatingCustomModel(false)
-      setActiveField('base_url')
-      setInputValue(displayValues.base_url ?? '')
-      setInputCursorOffset((displayValues.base_url ?? '').length)
+      setCustomPanel({ state: 'form', mode: 'add' })
+      setActiveField('label')
+      setLabelValue('')
+      setBaseUrl('')
+      setApiKey('')
+      setModelId('')
+      setInputValue('')
+      setInputCursorOffset(0)
+      return
+    }
+    if (value.startsWith(CUSTOM_PREFIX)) {
+      const id = value.slice(CUSTOM_PREFIX.length)
+      setCustomModelError(null)
+      setIsValidatingCustomModel(false)
+      setCustomPanel({ state: 'actions', id })
       return
     }
 
@@ -452,10 +606,33 @@ export function ModelPicker({
         </Box>
 
         <Box flexDirection="column" marginBottom={1}>
-          {isEnteringCustomModel ? (
+          {customPanel.state === 'form' ? (
             <Box flexDirection="column" gap={1}>
               <Text>Enter model config:</Text>
               <Box flexDirection="column" gap={1}>
+                <Box>
+                  <Text
+                    backgroundColor={activeField === 'label' ? 'suggestion' : undefined}
+                    color={activeField === 'label' ? 'inverseText' : undefined}
+                  >
+                    {' Label   '}
+                  </Text>
+                  <Text> </Text>
+                  {activeField === 'label' ? (
+                    <TextInput
+                      value={inputValue}
+                      onChange={setInputValue}
+                      onSubmit={handleCustomEnter}
+                      cursorOffset={inputCursorOffset}
+                      onChangeCursorOffset={setInputCursorOffset}
+                      columns={60}
+                      focus={true}
+                      placeholder={`e.g., Local Ollama${figures.ellipsis}`}
+                    />
+                  ) : labelValue ? (
+                    <Text color="success">{labelValue}</Text>
+                  ) : null}
+                </Box>
                 <Box>
                   <Text
                     backgroundColor={activeField === 'base_url' ? 'suggestion' : undefined}
@@ -530,7 +707,7 @@ export function ModelPicker({
                 </Box>
               </Box>
               <Text dimColor>
-                ↑↓/Tab to switch · Enter on last field to save · Esc to go back
+                Tab to switch · Enter on last field to save · Esc to go back
               </Text>
               {isValidatingCustomModel ? (
                 <Text dimColor>Validating…</Text>
@@ -539,6 +716,86 @@ export function ModelPicker({
               ) : (
                 <Text dimColor>Press Esc to go back</Text>
               )}
+            </Box>
+          ) : customPanel.state === 'actions' ? (
+            <Box flexDirection="column" gap={1}>
+              <Text bold>Custom model</Text>
+              <Select
+                defaultValue={CUSTOM_ACTION_USE}
+                defaultFocusValue={CUSTOM_ACTION_USE}
+                options={[
+                  {
+                    value: CUSTOM_ACTION_USE,
+                    label: 'Use',
+                    description: 'Apply this model configuration',
+                  },
+                  {
+                    value: CUSTOM_ACTION_EDIT,
+                    label: 'Edit',
+                    description: 'Modify base URL / API key / model ID',
+                  },
+                  {
+                    value: CUSTOM_ACTION_DELETE,
+                    label: 'Delete',
+                    description: 'Remove this saved custom model',
+                  },
+                  {
+                    value: CUSTOM_ACTION_BACK,
+                    label: 'Back',
+                    description: 'Return to model list',
+                  },
+                ]}
+                onChange={value => {
+                  const id = customPanel.id
+                  const entry = customModels.find(m => m.id === id)
+                  if (value === CUSTOM_ACTION_BACK) {
+                    setCustomPanel({ state: 'none' })
+                    return
+                  }
+                  if (!entry) {
+                    setCustomPanel({ state: 'none' })
+                    return
+                  }
+                  if (value === CUSTOM_ACTION_USE) {
+                    void applyCustomModel(entry)
+                    return
+                  }
+                  if (value === CUSTOM_ACTION_EDIT) {
+                    setCustomModelError(null)
+                    setIsValidatingCustomModel(false)
+                    setCustomPanel({ state: 'form', mode: 'edit', id })
+                    setActiveField('label')
+                    setLabelValue(entry.label ?? '')
+                    setBaseUrl(entry.baseUrl ?? '')
+                    setApiKey(entry.apiKey ?? '')
+                    setModelId(entry.model ?? '')
+                    setInputValue(entry.label ?? '')
+                    setInputCursorOffset((entry.label ?? '').length)
+                    return
+                  }
+                  if (value === CUSTOM_ACTION_DELETE) {
+                    const next = customModels.filter(m => m.id !== id)
+                    setCustomModels(next)
+                    const nextActive =
+                      activeCustomModelId === id ? undefined : activeCustomModelId
+                    setActiveCustomModelId(nextActive)
+                    updateSettingsForSource('userSettings', {
+                      customModels: next as any,
+                      activeCustomModelId: nextActive,
+                    } as any)
+                    setCustomPanel({ state: 'none' })
+                    return
+                  }
+                }}
+                onFocus={() => {}}
+                onCancel={() => setCustomPanel({ state: 'none' })}
+                visibleOptionCount={4}
+              />
+              {isValidatingCustomModel ? (
+                <Text dimColor>Validating…</Text>
+              ) : customModelError ? (
+                <Text color="error">{customModelError}</Text>
+              ) : null}
             </Box>
           ) : (
             <>
@@ -627,6 +884,9 @@ export function ModelPicker({
 
 function resolveOptionModel(value?: string): string | undefined {
   if (!value) return undefined
+  if (value.startsWith(CUSTOM_PREFIX)) {
+    return undefined
+  }
   return value === NO_PREFERENCE
     ? getDefaultMainLoopModel()
     : parseUserSpecifiedModel(value)

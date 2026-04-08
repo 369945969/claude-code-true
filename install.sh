@@ -7,6 +7,8 @@
 #   ./install.sh              # Install with default settings
 #   ./install.sh --dev        # Install in development mode
 #   ./install.sh --force      # Force re-installation
+#   ./install.sh --local      # Install from current local source tree
+#   ./install.sh --uninstall  # Uninstall existing installation
 #   ./install.sh --help       # Show help
 #
 # Environment Variables:
@@ -271,6 +273,90 @@ EOF
     log_info "  ${EXECUTABLE_NAME}"
 }
 
+install_from_local() {
+    local install_mode="$1"  # "dev" or "release"
+
+    log_step "Installing ${PROJECT_NAME} from local source..."
+    log_info "Local source: ${SCRIPT_DIR}"
+
+    mkdir -p "${INSTALL_DIR}"
+
+    cd "${SCRIPT_DIR}"
+
+    if [ "$USE_NPM" = "1" ]; then
+        log_step "Installing dependencies with npm..."
+        npm install
+    else
+        log_step "Installing dependencies with bun..."
+        bun install
+    fi
+
+    if [ "$install_mode" = "release" ]; then
+        log_step "Building project..."
+        if [ "$USE_NPM" = "1" ]; then
+            npm run build
+        else
+            bun run build
+        fi
+    fi
+
+    log_step "Creating symlink..."
+    local bin_dir="${INSTALL_DIR}/bin"
+    mkdir -p "${bin_dir}"
+
+    if [ "$PLATFORM" = "win32" ]; then
+        log_error "--local is not supported on win32 in this installer."
+        exit 1
+    fi
+
+    if [ "$install_mode" = "release" ]; then
+        cat > "${bin_dir}/${EXECUTABLE_NAME}" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${SCRIPT_DIR}"
+exec bun run "${SCRIPT_DIR}/dist/cli.js" "\$@"
+EOF
+    else
+        cat > "${bin_dir}/${EXECUTABLE_NAME}" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${SCRIPT_DIR}"
+exec bun run "${SCRIPT_DIR}/scripts/dev.ts" "\$@"
+EOF
+    fi
+    chmod +x "${bin_dir}/${EXECUTABLE_NAME}"
+
+    local shell_config=""
+    case "$SHELL" in
+        */zsh)
+            shell_config="${HOME}/.zshrc"
+            ;;
+        */bash)
+            if [ "$PLATFORM" = "darwin" ] || [ "$PLATFORM" = "linux" ]; then
+                shell_config="${HOME}/.bashrc"
+                if [ ! -f "$shell_config" ]; then
+                    shell_config="${HOME}/.bash_profile"
+                fi
+            else
+                shell_config="${HOME}/.bash_profile"
+            fi
+            ;;
+    esac
+
+    if [ -n "$shell_config" ]; then
+        if ! grep -q "${bin_dir}" "$shell_config" 2>/dev/null; then
+            log_step "Adding ${bin_dir} to PATH in ${shell_config}..."
+            echo "" >> "$shell_config"
+            echo "# Claude Code Best bin" >> "$shell_config"
+            echo "export PATH=\"${bin_dir}:\$PATH\"" >> "$shell_config"
+            log_info "Added to PATH. Run 'source ${shell_config}' or restart your terminal."
+        fi
+    fi
+
+    log_info "Installation complete!"
+    log_info "Executable: ${bin_dir}/${EXECUTABLE_NAME}"
+}
+
 install_standalone() {
     # Standalone installation (downloads pre-built binary if available)
     log_step "Installing standalone version..."
@@ -306,6 +392,30 @@ post_install() {
     log_info "Post-installation complete."
 }
 
+uninstall_existing() {
+    log_step "Uninstalling ${PROJECT_NAME}..."
+
+    local project_dir="${INSTALL_DIR}/${PROJECT_NAME}"
+    local bin_dir="${INSTALL_DIR}/bin"
+    local exe_path="${bin_dir}/${EXECUTABLE_NAME}"
+
+    if [ -e "${exe_path}" ] || [ -d "${project_dir}" ] || [ -d "${bin_dir}" ]; then
+        rm -rf "${project_dir}" || true
+        rm -f "${exe_path}" || true
+        if [ -d "${bin_dir}" ] && [ -z "$(ls -A "${bin_dir}" 2>/dev/null)" ]; then
+            rmdir "${bin_dir}" 2>/dev/null || true
+        fi
+        if [ -d "${INSTALL_DIR}" ] && [ -z "$(ls -A "${INSTALL_DIR}" 2>/dev/null)" ]; then
+            rmdir "${INSTALL_DIR}" 2>/dev/null || true
+        fi
+        log_info "Uninstalled from ${INSTALL_DIR}"
+        return 0
+    fi
+
+    log_warn "No installation found at ${INSTALL_DIR}"
+    return 0
+}
+
 # --- Help ---
 
 show_help() {
@@ -318,6 +428,8 @@ Options:
   --dev       Install in development mode (no build)
   --release   Install release version (with build, default)
   --force     Force re-installation
+  --local     Install from current local source tree
+  --uninstall Uninstall existing installation
   --standalone  Install standalone binary (if available)
   --help      Show this help message
 
@@ -341,6 +453,8 @@ EOF
 main() {
     local install_mode="release"
     local standalone=0
+    local local_install=0
+    local uninstall_only=0
     FORCE=0
 
     # Parse arguments
@@ -360,6 +474,14 @@ main() {
                 ;;
             --standalone)
                 standalone=1
+                shift
+                ;;
+            --local)
+                local_install=1
+                shift
+                ;;
+            --uninstall)
+                uninstall_only=1
                 shift
                 ;;
             --help|-h)
@@ -388,11 +510,20 @@ main() {
     # Check prerequisites
     check_prerequisites
 
+    if [ "$uninstall_only" -eq 1 ]; then
+        uninstall_existing
+        return 0
+    fi
+
     # Install
     if [ "$standalone" -eq 1 ]; then
         install_standalone
     else
-        install_from_source "${install_mode}"
+        if [ "$local_install" -eq 1 ]; then
+            install_from_local "${install_mode}"
+        else
+            install_from_source "${install_mode}"
+        fi
     fi
 
     # Post-install

@@ -403,6 +403,40 @@ export const SettingsSchema = lazySchema(() =>
             'model ID (e.g. a Bedrock inference profile ARN). Typically set in managed settings by ' +
             'enterprise administrators.',
         ),
+      customModels: z
+        .array(
+          z.object({
+            id: z.string().describe('Stable identifier for a saved custom model'),
+            label: z
+              .string()
+              .optional()
+              .describe('Human-friendly label shown in the model picker'),
+            provider: z
+              .enum(['openai'])
+              .describe('Provider protocol used by this custom model'),
+            baseUrl: z
+              .string()
+              .optional()
+              .describe('Base URL for the OpenAI-compatible endpoint'),
+            apiKey: z
+              .string()
+              .optional()
+              .describe('API key for the endpoint (may be empty for local endpoints)'),
+            model: z
+              .string()
+              .describe('Model ID to send to the provider endpoint'),
+          }),
+        )
+        .optional()
+        .describe(
+          'Saved custom model entries (OpenAI-compatible endpoints). These can be added/edited in the /model picker.',
+        ),
+      activeCustomModelId: z
+        .string()
+        .optional()
+        .describe(
+          'If set, the model picker will highlight the matching customModels entry as the current selection.',
+        ),
       // Whether to automatically approve all MCP servers in the project
       enableAllProjectMcpServers: z
         .boolean()
@@ -1153,4 +1187,3 @@ export type PluginConfig = {
     [serverName: string]: UserConfigValues
   }
 }
-
