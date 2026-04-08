@@ -138,6 +138,15 @@ export function ModelPicker({
   )
 
   const optionsWithProviderAdditions = useMemo(() => {
+    const customModelIds = new Set(customModels.map(m => m.model))
+    const filteredModelOptions = modelOptions.filter(opt => {
+      if (typeof opt.value !== 'string') return true
+      if (!customModelIds.has(opt.value)) return true
+      const desc = typeof opt.description === 'string' ? opt.description : ''
+      if (!desc.toLowerCase().includes('custom model')) return true
+      return false
+    })
+
     const customOptions = customModels.map(m => {
       let suffix = ''
       if (m.baseUrl) {
@@ -154,7 +163,7 @@ export function ModelPicker({
       }
     })
     return [
-      ...modelOptions,
+      ...filteredModelOptions,
       ...customOptions,
       {
         value: CUSTOM_ADD,
@@ -173,19 +182,19 @@ export function ModelPicker({
   const optionsWithInitial = useMemo(() => {
     if (
       initial !== null &&
-      !optionsWithProviderAdditions.some(opt => opt.value === initial)
+      !optionsWithProviderAdditions.some(opt => opt.value === initialValue)
     ) {
       return [
         ...optionsWithProviderAdditions,
         {
-          value: initial,
-          label: modelDisplayString(initial),
+          value: initialValue,
+          label: modelDisplayString(initialValue),
           description: 'Current model',
         },
       ]
     }
     return optionsWithProviderAdditions
-  }, [optionsWithProviderAdditions, initial])
+  }, [optionsWithProviderAdditions, initial, initialValue])
 
   const selectOptions = useMemo(
     () =>
