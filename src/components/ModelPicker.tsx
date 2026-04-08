@@ -1,4 +1,4 @@
-import capitalize from 'lodash-es/capitalize.js'
+import figures from 'figures'
 import * as React from 'react'
 import { useCallback, useMemo, useState } from 'react'
 import { useExitOnCtrlCDWithKeybindings } from 'src/hooks/useExitOnCtrlCDWithKeybindings.js'
@@ -12,8 +12,10 @@ import {
   isFastModeCooldown,
   isFastModeEnabled,
 } from 'src/utils/fastMode.js'
+import { getAPIProvider } from 'src/utils/model/providers.js'
+import { capitalize } from 'src/utils/stringUtils.js'
 import { Box, Text } from '@anthropic/ink'
-import { useKeybindings } from '../keybindings/useKeybinding.js'
+import { useKeybinding, useKeybindings } from '../keybindings/useKeybinding.js'
 import { useAppState, useSetAppState } from '../state/AppState.js'
 import {
   convertEffortValueToLevel,
@@ -39,6 +41,7 @@ import { ConfigurableShortcutHint } from './ConfigurableShortcutHint.js'
 import { Select } from './CustomSelect/index.js'
 import { Byline, KeyboardShortcutHint, Pane } from '@anthropic/ink'
 import { effortLevelToSymbol } from './EffortIndicator.js'
+import TextInput from './TextInput.js'
 
 export type Props = {
   initial: string | null
@@ -59,6 +62,7 @@ export type Props = {
 }
 
 const NO_PREFERENCE = '__NO_PREFERENCE__'
+const OPENAI_CUSTOM_MODEL = '__OPENAI_CUSTOM_MODEL__'
 
 export function ModelPicker({
   initial,
@@ -73,6 +77,7 @@ export function ModelPicker({
   const setAppState = useSetAppState()
   const exitState = useExitOnCtrlCDWithKeybindings()
   const maxVisible = 10
+  const provider = getAPIProvider()
 
   const initialValue = initial === null ? NO_PREFERENCE : initial
   const [focusedValue, setFocusedValue] = useState<string | undefined>(
@@ -97,13 +102,28 @@ export function ModelPicker({
     [isFastMode],
   )
 
+  const optionsWithProviderAdditions = useMemo(() => {
+    if (provider !== 'openai') return modelOptions
+    return [
+      ...modelOptions,
+      {
+        value: OPENAI_CUSTOM_MODEL,
+        label: 'Custom (OpenAI)',
+        description: 'Enter a model ID for your OpenAI-compatible endpoint',
+      },
+    ]
+  }, [modelOptions, provider])
+
   // Ensure the initial value is in the options list
   // This handles edge cases where the user's current model (e.g., 'haiku' for 3P users)
   // is not in the base options but should still be selectable and shown as selected
   const optionsWithInitial = useMemo(() => {
-    if (initial !== null && !modelOptions.some(opt => opt.value === initial)) {
+    if (
+      initial !== null &&
+      !optionsWithProviderAdditions.some(opt => opt.value === initial)
+    ) {
       return [
-        ...modelOptions,
+        ...optionsWithProviderAdditions,
         {
           value: initial,
           label: modelDisplayString(initial),
@@ -111,8 +131,8 @@ export function ModelPicker({
         },
       ]
     }
-    return modelOptions
-  }, [modelOptions, initial])
+    return optionsWithProviderAdditions
+  }, [optionsWithProviderAdditions, initial])
 
   const selectOptions = useMemo(
     () =>
@@ -148,6 +168,29 @@ export function ModelPicker({
   const displayEffort =
     effort === 'max' && !focusedSupportsMax ? 'high' : effort
 
+  const [isEnteringCustomModel, setIsEnteringCustomModel] = useState(false)
+  const [customModelInput, setCustomModelInput] = useState(() => {
+    if (provider !== 'openai') return ''
+    if (initial === null) return ''
+    const isBuiltIn = optionsWithProviderAdditions.some(
+      opt => opt.value === initial,
+    )
+    return isBuiltIn ? '' : initial
+  })
+  const [customModelCursorOffset, setCustomModelCursorOffset] = useState(() => {
+    if (provider !== 'openai') return 0
+    return customModelInput.length
+  })
+
+  useKeybinding(
+    'confirm:no',
+    () => {
+      if (!isEnteringCustomModel) return
+      setIsEnteringCustomModel(false)
+    },
+    { context: 'Settings' },
+  )
+
   const handleFocus = useCallback(
     (value: string) => {
       setFocusedValue(value)
@@ -182,29 +225,43 @@ export function ModelPicker({
     { context: 'ModelPicker' },
   )
 
-  function handleSelect(value: string): void {
-    logEvent('tengu_model_command_menu_effort', {
-      effort:
-        effort as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
-    if (!skipSettingsWrite) {
-      // Prior comes from userSettings on disk — NOT merged settings (which
-      // includes project/policy layers that must not leak into the user's
-      // global ~/.claude/settings.json), and NOT AppState.effortValue (which
-      // includes session-ephemeral sources like --effort CLI flag).
-      // See resolvePickerEffortPersistence JSDoc.
-      const effortLevel = resolvePickerEffortPersistence(
-        effort,
-        getDefaultEffortLevelForOption(value),
-        getSettingsForSource('userSettings')?.effortLevel,
-        hasToggledEffort,
-      )
-      const persistable = toPersistableEffort(effortLevel)
-      if (persistable !== undefined) {
-        updateSettingsForSource('userSettings', { effortLevel: persistable })
+  const persistEffortSelection = useCallback(
+    (value: string) => {
+      logEvent('tengu_model_command_menu_effort', {
+        effort:
+          effort as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+      })
+      if (!skipSettingsWrite) {
+        const effortLevel = resolvePickerEffortPersistence(
+          effort,
+          getDefaultEffortLevelForOption(value),
+          getSettingsForSource('userSettings')?.effortLevel,
+          hasToggledEffort,
+        )
+        const persistable = toPersistableEffort(effortLevel)
+        if (persistable !== undefined) {
+          updateSettingsForSource('userSettings', { effortLevel: persistable })
+        }
+        setAppState(prev => ({ ...prev, effortValue: effortLevel }))
       }
-      setAppState(prev => ({ ...prev, effortValue: effortLevel }))
+    },
+    [
+      effort,
+      hasToggledEffort,
+      setAppState,
+      skipSettingsWrite,
+      getDefaultEffortLevelForOption,
+    ],
+  )
+
+  function handleSelect(value: string): void {
+    if (value === OPENAI_CUSTOM_MODEL) {
+      setIsEnteringCustomModel(true)
+      setCustomModelCursorOffset(customModelInput.length)
+      return
     }
+
+    persistEffortSelection(value)
 
     const selectedModel = resolveOptionModel(value)
     const selectedEffort =
@@ -218,6 +275,11 @@ export function ModelPicker({
     onSelect(value, selectedEffort)
   }
 
+  const customHeaderText =
+    provider === 'openai'
+      ? 'Switch the model ID for your OpenAI-compatible endpoint. This applies to this session and future sessions.'
+      : undefined
+
   const content = (
     <Box flexDirection="column">
       <Box flexDirection="column">
@@ -227,6 +289,7 @@ export function ModelPicker({
           </Text>
           <Text dimColor>
             {headerText ??
+              customHeaderText ??
               'Switch between Claude models. Applies to this session and future Claude Code sessions. For other/previous model names, specify with --model.'}
           </Text>
           {sessionModel && (
@@ -238,21 +301,58 @@ export function ModelPicker({
         </Box>
 
         <Box flexDirection="column" marginBottom={1}>
-          <Box flexDirection="column">
-            <Select
-              defaultValue={initialValue}
-              defaultFocusValue={initialFocusValue}
-              options={selectOptions}
-              onChange={handleSelect}
-              onFocus={handleFocus}
-              onCancel={onCancel ?? (() => {})}
-              visibleOptionCount={visibleCount}
-            />
-          </Box>
-          {hiddenCount > 0 && (
-            <Box paddingLeft={3}>
-              <Text dimColor>and {hiddenCount} more…</Text>
+          {isEnteringCustomModel ? (
+            <Box flexDirection="column" gap={1}>
+              <Text>Enter OpenAI model ID:</Text>
+              <Box flexDirection="row" gap={1}>
+                <Text>{figures.pointer}</Text>
+                <TextInput
+                  value={customModelInput}
+                  onChange={setCustomModelInput}
+                  onSubmit={() => {
+                    const trimmed = customModelInput.trim()
+                    if (!trimmed) {
+                      setIsEnteringCustomModel(false)
+                      return
+                    }
+                    persistEffortSelection(trimmed)
+                    const selectedModel = trimmed
+                    const selectedEffort =
+                      hasToggledEffort && modelSupportsEffort(selectedModel)
+                        ? effort
+                        : undefined
+                    setIsEnteringCustomModel(false)
+                    onSelect(selectedModel, selectedEffort)
+                  }}
+                  focus={true}
+                  showCursor={true}
+                  placeholder={`e.g., qwen2.5-coder${figures.ellipsis}`}
+                  columns={60}
+                  cursorOffset={customModelCursorOffset}
+                  onChangeCursorOffset={setCustomModelCursorOffset}
+                />
+              </Box>
+              <Text dimColor>Press Esc to go back</Text>
             </Box>
+          ) : (
+            <>
+              <Box flexDirection="column">
+                <Select
+                  defaultValue={initialValue}
+                  defaultFocusValue={initialFocusValue}
+                  options={selectOptions}
+                  onChange={handleSelect}
+                  onFocus={handleFocus}
+                  onCancel={onCancel ?? (() => {})}
+                  visibleOptionCount={visibleCount}
+                />
+              </Box>
+              {hiddenCount > 0 && (
+                <Box paddingLeft={3}>
+                  <Text dimColor>and {hiddenCount} more…</Text>
+                </Box>
+              )}
+            </>
           )}
         </Box>
 
