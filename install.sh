@@ -4,10 +4,10 @@
 # Supports: macOS, Linux, Windows (Git Bash/WSL)
 #
 # Usage:
-#   ./install.sh              # Install with default settings
+#   ./install.sh              # Install from current local source tree (default)
 #   ./install.sh --dev        # Install in development mode
 #   ./install.sh --force      # Force re-installation
-#   ./install.sh --local      # Install from current local source tree
+#   ./install.sh --local      # (Same as default) Install from current local source tree
 #   ./install.sh --uninstall  # Uninstall existing installation
 #   ./install.sh --help       # Show help
 #
@@ -428,7 +428,7 @@ Options:
   --dev       Install in development mode (no build)
   --release   Install release version (with build, default)
   --force     Force re-installation
-  --local     Install from current local source tree
+  --local     Install from current local source tree (default)
   --uninstall Uninstall existing installation
   --standalone  Install standalone binary (if available)
   --help      Show this help message
@@ -453,7 +453,7 @@ EOF
 main() {
     local install_mode="release"
     local standalone=0
-    local local_install=0
+    local local_install=1
     local uninstall_only=0
     FORCE=0
 
@@ -519,11 +519,7 @@ main() {
     if [ "$standalone" -eq 1 ]; then
         install_standalone
     else
-        if [ "$local_install" -eq 1 ]; then
-            install_from_local "${install_mode}"
-        else
-            install_from_source "${install_mode}"
-        fi
+        install_from_local "${install_mode}"
     fi
 
     # Post-install
