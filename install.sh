@@ -313,14 +313,12 @@ install_from_local() {
         cat > "${bin_dir}/${EXECUTABLE_NAME}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "${SCRIPT_DIR}"
 exec bun run "${SCRIPT_DIR}/dist/cli.js" "\$@"
 EOF
     else
         cat > "${bin_dir}/${EXECUTABLE_NAME}" << EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "${SCRIPT_DIR}"
 exec bun run "${SCRIPT_DIR}/scripts/dev.ts" "\$@"
 EOF
     fi
