@@ -55,7 +55,7 @@ const inspectArgs = process.env.BUN_INSPECT
 
 const result = Bun.spawnSync(
     ["bun", ...inspectArgs, "run", ...defineArgs, ...featureArgs, cliPath, ...process.argv.slice(2)],
-    { stdio: ["inherit", "inherit", "inherit"], cwd: projectRoot },
+    { stdio: ["inherit", "inherit", "inherit"] },
 );
 
 process.exit(result.exitCode ?? 0);
